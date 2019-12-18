@@ -1,0 +1,1 @@
+rule http: bar {strings: $a = "lmn" condition: $a}
