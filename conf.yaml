@@ -1,0 +1,13 @@
+server:
+- ip: 127.0.0.1
+  port:
+    end: 18081
+    start: 18080
+  rules:
+    default:
+        ip: 127.0.0.1
+        port: 2323
+    snort:
+    - ./snort_rules/index.rules
+    yara:
+      namespace1: ./yara_rules/index.rule

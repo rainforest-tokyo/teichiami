@@ -1,0 +1,1 @@
+alert tcp any 18080 -> 127.0.0.1 80 ( gid:100; sid:1001; msg:"HTTP Forward"; )

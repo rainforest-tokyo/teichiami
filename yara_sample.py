@@ -2,8 +2,7 @@
 import yara
 
 rules = yara.compile(filepaths={
-  'namespace1':'./rules/http.rule',
-  'namespace2':'./rules/smb.rule'
+  'namespace1':'./rules/index.rule'
 })
 
 matches = rules.match(data='abcdefgjiklmnoprstuvwxyz')
