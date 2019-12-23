@@ -2,10 +2,10 @@
 import yara
 
 rules = yara.compile(filepaths={
-  'namespace1':'./rules/index.rule'
+  'namespace1':'./yara_rules/index.rule'
 })
 
-matches = rules.match(data='abcdefgjiklmnoprstuvwxyz')
+matches = rules.match(data='GET /index.html HTTP/1.1')
 
 for r in matches :
     print(r.namespace)

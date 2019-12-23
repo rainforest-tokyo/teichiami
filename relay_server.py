@@ -23,6 +23,7 @@ class ConnectionClass():
         self.request = ""
         self.response = ""
         self.buffer = ""
+        self.mutch_flag = False
 
     def setClient( self, connection ):
         self.client_connection = connection
@@ -50,6 +51,12 @@ class ConnectionClass():
         tmp = self.buffer
         self.buffer = ""
         return tmp
+
+    def setMutchFlag( self, flag ) :
+        self.mutch_flag = flag
+
+    def getMutchFlag( self ) :
+        return self.mutch_flag
 
 @contextmanager
 def socketcontext(*args, **kwargs):
@@ -104,33 +111,64 @@ def receive_request(fileno, connections, epoll, rules):
 
     honey_ip = rules['default']['ip']
     honey_port = rules['default']['port']
-    mutch_flag = False
+    mutch_flag = obj.getMutchFlag()
 
     recv_ip = con.getsockname()[0]
     recv_port = con.getsockname()[1]
     logging.debug("recv port [%d][%s][%d]"%(fileno, recv_ip, recv_port))
 
     # Check Snort Rule
-    for item in rules['snort_data'] :
-        if (item['src'] == 'any') and (item['src_port'] == 'any') :
-            continue
+    if mutch_flag == False :
+        for item in rules['snort_data'] :
+            if (item['src'] == 'any') and (item['src_port'] == 'any') :
+                continue
 
-        if ((('any' in item['src']) or (recv_ip in item['src'])) \
-        and (('any' in item['src_port']) or (str(recv_port) in item['src_port']))) :
-            honey_ip = item['dst'][0]
-            honey_port = int(item['dst_port'][0])
-            mutch_flag = True
-            break
-    logging.debug("hony port [%d][%s][%d]"%(fileno, honey_ip, honey_port))
+            if ((('any' in item['src']) or (recv_ip in item['src'])) \
+            and (('any' in item['src_port']) or (str(recv_port) in item['src_port']))) :
+                honey_ip = item['dst'][0]
+                honey_port = int(item['dst_port'][0])
+
+                current = obj.getHoney()
+                if current != None :
+                    try :
+                        current.detach()
+                    except :
+                        current.close()
+
+                current = conenct_to_honey( honey_ip, honey_port )
+                logging.debug("SNORT hony port [%d][%s][%d]"%(fileno, honey_ip, honey_port))
+                obj.setHoney(current)
+                mutch_flag = True
+                obj.setMutchFlag( mutch_flag )
+                break
 
     # Check YARA Rule
     if mutch_flag == False:
-        pass
+        req_data = obj.getRequest()
+        matches = rules['yara_data'].match(data=req_data)
+        for r in matches :
+            honey_ip = r.meta['honey_ip']
+            honey_port = r.meta['honey_port']
+
+            current = obj.getHoney()
+            if current != None :
+                try :
+                    current.detach()
+                except :
+                    current.close()
+
+            current = conenct_to_honey( honey_ip, honey_port )
+            logging.debug("YARA hony port [%d][%s][%d]"%(fileno, honey_ip, honey_port))
+            obj.setHoney(current)
+            mutch_flag = True
+            obj.setMutchFlag( mutch_flag )
+            break
 
     # Connect To Honey
     current = obj.getHoney()
     if current == None :
         current = conenct_to_honey( honey_ip, honey_port )
+        logging.debug("DEF hony port [%d][%s][%d]"%(fileno, honey_ip, honey_port))
         obj.setHoney(current)
 
     # Send To Honey
