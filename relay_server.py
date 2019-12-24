@@ -8,6 +8,7 @@ import yaml
 import socket
 import select
 
+import chardet
 import logging
 import threading
 
@@ -15,6 +16,7 @@ import yara
 import snortsig
 
 logging.basicConfig(level=logging.DEBUG, format='%(threadName)s: %(message)s')
+logging.getLogger('chardet.charsetprober').setLevel(logging.INFO)
 
 class ConnectionClass():
     def __init__(self):
@@ -43,6 +45,9 @@ class ConnectionClass():
     def getRequest( self ) :
         return self.request
 
+    def doneRequest( self ) :
+        self.request = ""
+
     def addResponse( self, data ) :
         self.buffer = data
         self.response += data
@@ -65,7 +70,9 @@ def socketcontext(*args, **kwargs):
     try:
         yield s
     finally:
+        fd = s.fileno()
         print("Close socket")
+        print( fd )
         s.close()
 
 @contextmanager
@@ -80,9 +87,10 @@ def epollcontext(*args, **kwargs):
         e.unregister(args[0])
         e.close()
 
-def conenct_to_honey(host, port):
+def connenct_to_honey(host, port):
     client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     client.connect((host, port))
+    client.settimeout(1.0)
     return client
 
 def init_connection(server, connections, epoll):
@@ -100,22 +108,60 @@ def init_connection(server, connections, epoll):
 def receive_request(fileno, connections, epoll, rules):
     obj = connections[fileno]
     con = obj.getClient()
+
+    # Get Recv Client Info
+    recv_ip = con.getsockname()[0]
+    recv_port = con.getsockname()[1]
+    logging.debug("recv port [%d][%s][%d]"%(fileno, recv_ip, recv_port))
+
+    # Set Honey Info
+    mutch_flag = obj.getMutchFlag()
+    honey_ip = rules['default']['ip']
+    honey_port = rules['default']['port']
+
+    # Recv Data
     tmp = con.recv(4096)
+    # Empty Check: empty -> close socket
     if tmp == "" :
+        obj.doneRequest()
         close_request(fileno, connections)
         return
 
     obj.addRequest( tmp )
 
-    logging.debug("request [%d][%s]"%(fileno, obj.getRequest()))
+    # ASCII code Check
+    ascii_check = obj.getRequest( )
+    if (len(ascii_check) > 0) and (ord(ascii_check[len(ascii_check)-1]) == 0x0) :
+        ascii_check = ascii_check[0:len(ascii_check)-1]
+    before_len = len( ascii_check )
+    ascii_check = ascii_check.strip()
+    after_len = len( ascii_check )
 
-    honey_ip = rules['default']['ip']
-    honey_port = rules['default']['port']
-    mutch_flag = obj.getMutchFlag()
+#    poll_mode = select.EPOLLOUT
+    send_to_honey = True
 
-    recv_ip = con.getsockname()[0]
-    recv_port = con.getsockname()[1]
-    logging.debug("recv port [%d][%s][%d]"%(fileno, recv_ip, recv_port))
+    str_status = ascii_check.isalnum()
+    if str_status :
+        logging.debug("recv request (TEXT) [%d][%s]"%(fileno, ascii_check))
+        if mutch_flag == False :
+            if before_len == after_len :
+                logging.debug("not found New LINE")
+#                poll_mode = select.EPOLLIN
+                send_to_honey = False
+            else :
+                if ord(tmp[len(tmp)-1]) == 0x0 :
+                    tmp = tmp[0:len(tmp)-1]
+#                tmp += '\r\n'
+    else :
+        logging.debug("recv request (BIN) [%d][%s]"%(fileno, tmp))
+
+    poll_mode = select.EPOLLOUT + select.EPOLLIN
+
+    # Empty Check: empty -> close socket
+#    if tmp == "" :
+#        obj.doneRequest()
+#        close_request(fileno, connections)
+#        return
 
     # Check Snort Rule
     if mutch_flag == False :
@@ -157,7 +203,7 @@ def receive_request(fileno, connections, epoll, rules):
                 except :
                     current.close()
 
-            current = conenct_to_honey( honey_ip, honey_port )
+            current = connenct_to_honey( honey_ip, honey_port )
             logging.debug("YARA hony port [%d][%s][%d]"%(fileno, honey_ip, honey_port))
             obj.setHoney(current)
             mutch_flag = True
@@ -167,45 +213,90 @@ def receive_request(fileno, connections, epoll, rules):
     # Connect To Honey
     current = obj.getHoney()
     if current == None :
-        current = conenct_to_honey( honey_ip, honey_port )
+        current = connenct_to_honey( honey_ip, honey_port )
         logging.debug("DEF hony port [%d][%s][%d]"%(fileno, honey_ip, honey_port))
         obj.setHoney(current)
 
     # Send To Honey
-    current.send( tmp )
+    try :
+        current.send( tmp )
+        logging.debug("Send hony [%d][%s][%d][%d][%s]"%(fileno, honey_ip, honey_port, len(tmp), tmp))
+        obj.doneRequest()
+    except :
+        close_request(fileno, connections)
 
     # Recv From Honey
-    response = current.recv(4096)
-    obj.addResponse( response )
+#    if poll_mode == select.EPOLLOUT :
+#    if send_to_honey == True :
+#        logging.debug("POLL OUT MODE")
+#        response = current.recv(4096)
+#        logging.debug("Recv hony [%d][%s][%d][%d][%s]"%(fileno, honey_ip, honey_port, len(response), response))
+#        obj.addResponse( response )
+#    else :
+#        logging.debug("POLL IN MODE")
 
-    epoll.modify(fileno, select.EPOLLOUT)
+    try :
+        #epoll.modify(fileno, select.EPOLLOUT)
+        epoll.modify(fileno, poll_mode)
+    except :
+        close_request(fileno, connections)
 
 def send_response(fileno, connections, epoll):
-    """Send a response to a client."""
+    poll_mode = select.EPOLLOUT + select.EPOLLIN
+    #poll_mode = select.EPOLLIN
+
     #byteswritten = connections[fileno].send(responses[fileno])
     obj = connections[fileno]
-    res_data = obj.getResponse()
-    obj.getClient().send( res_data )
+    current = obj.getHoney()
+    try :
+        response = current.recv(4096)
+        logging.debug("Recv hony [%d][%d][%s]"%(fileno, len(response), response))
+        obj.addResponse( response )
+        if response == "" :
+            close_request(fileno, connections)
+    except :
+        return
 
-    # 
-    epoll.modify(fileno, select.EPOLLIN)
+    try :
+        res_data = obj.getResponse()
+        logging.debug("send response [%d][%s]"%(fileno, res_data))
+        obj.getClient().send( res_data )
+
+        # 
+        #epoll.modify(fileno, select.EPOLLIN)
+        epoll.modify(fileno, poll_mode)
+    except :
+        try :
+            close_request(fileno, connections)
+        except :
+            pass
 
 def close_request(fileno, connections):
-    obj = connections[fileno]
+    try :
+        obj = connections[fileno]
+    except :
+        return
 
     logging.debug("close [%d]"%(fileno))
     # close
     try :
         obj.getClient().detach()
     except :
-        obj.getClient().close()
+        try :
+            obj.getClient().close()
+        except :
+            pass
         
     current = obj.getHoney()
     if current == None :
         try :
             current.detach()
         except :
-            current.close()
+            try :
+                obj.getClient().close()
+            except :
+                pass
+
     del connections[fileno]
 
 def run_server(socket_options, address, rules):
@@ -230,8 +321,10 @@ def run_server(socket_options, address, rules):
                     if fileno == server_fd:
                         init_connection(server, connections, epoll)
                     elif event & select.EPOLLIN:
+                        logging.debug("request [%d][%s]"%(fileno, "select.EPOLLIN"))
                         receive_request(fileno, connections, epoll, rules)
                     elif event & select.EPOLLOUT:
+                        logging.debug("request [%d][%s]"%(fileno, "select.EPOLLOUT"))
                         send_response(fileno, connections, epoll)
                     elif event & select.EPOLLRDHUP:
                         logging.debug("request [%d][%s]"%(fileno, "select.EPOLLRDHUP"))
