@@ -2,7 +2,7 @@ server:
 - ip: 127.0.0.1
   port:
     start: 18080
-    end: 18085
+    end: 19000
   rules:
     default:
         ip: 127.0.0.1

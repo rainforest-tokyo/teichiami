@@ -112,7 +112,7 @@ def receive_request(fileno, connections, epoll, rules):
     # Get Recv Client Info
     recv_ip = con.getsockname()[0]
     recv_port = con.getsockname()[1]
-    logging.debug("recv port [%d][%s][%d]"%(fileno, recv_ip, recv_port))
+#    logging.debug("recv port [%d][%s][%d]"%(fileno, recv_ip, recv_port))
 
     # Set Honey Info
     mutch_flag = obj.getMutchFlag()
@@ -137,31 +137,22 @@ def receive_request(fileno, connections, epoll, rules):
     ascii_check = ascii_check.strip()
     after_len = len( ascii_check )
 
-#    poll_mode = select.EPOLLOUT
     send_to_honey = True
 
     str_status = ascii_check.isalnum()
     if str_status :
-        logging.debug("recv request (TEXT) [%d][%s]"%(fileno, ascii_check))
+#        logging.debug("recv request (TEXT) [%d][%s]"%(fileno, ascii_check))
         if mutch_flag == False :
             if before_len == after_len :
-                logging.debug("not found New LINE")
-#                poll_mode = select.EPOLLIN
+#                logging.debug("not found New LINE")
                 send_to_honey = False
             else :
                 if ord(tmp[len(tmp)-1]) == 0x0 :
                     tmp = tmp[0:len(tmp)-1]
-#                tmp += '\r\n'
-    else :
-        logging.debug("recv request (BIN) [%d][%s]"%(fileno, tmp))
+#    else :
+#        logging.debug("recv request (BIN) [%d][%s]"%(fileno, tmp))
 
     poll_mode = select.EPOLLOUT + select.EPOLLIN
-
-    # Empty Check: empty -> close socket
-#    if tmp == "" :
-#        obj.doneRequest()
-#        close_request(fileno, connections)
-#        return
 
     # Check Snort Rule
     if mutch_flag == False :
@@ -214,29 +205,18 @@ def receive_request(fileno, connections, epoll, rules):
     current = obj.getHoney()
     if current == None :
         current = connenct_to_honey( honey_ip, honey_port )
-        logging.debug("DEF hony port [%d][%s][%d]"%(fileno, honey_ip, honey_port))
+        #logging.debug("DEF hony port [%d][%s][%d]"%(fileno, honey_ip, honey_port))
         obj.setHoney(current)
 
     # Send To Honey
     try :
         current.send( tmp )
-        logging.debug("Send hony [%d][%s][%d][%d][%s]"%(fileno, honey_ip, honey_port, len(tmp), tmp))
+        #logging.debug("Send hony [%d][%s][%d][%d][%s]"%(fileno, honey_ip, honey_port, len(tmp), tmp))
         obj.doneRequest()
     except :
         close_request(fileno, connections)
 
-    # Recv From Honey
-#    if poll_mode == select.EPOLLOUT :
-#    if send_to_honey == True :
-#        logging.debug("POLL OUT MODE")
-#        response = current.recv(4096)
-#        logging.debug("Recv hony [%d][%s][%d][%d][%s]"%(fileno, honey_ip, honey_port, len(response), response))
-#        obj.addResponse( response )
-#    else :
-#        logging.debug("POLL IN MODE")
-
     try :
-        #epoll.modify(fileno, select.EPOLLOUT)
         epoll.modify(fileno, poll_mode)
     except :
         close_request(fileno, connections)
@@ -250,7 +230,7 @@ def send_response(fileno, connections, epoll):
     current = obj.getHoney()
     try :
         response = current.recv(4096)
-        logging.debug("Recv hony [%d][%d][%s]"%(fileno, len(response), response))
+        #logging.debug("Recv hony [%d][%d][%s]"%(fileno, len(response), response))
         obj.addResponse( response )
         if response == "" :
             close_request(fileno, connections)
@@ -259,11 +239,8 @@ def send_response(fileno, connections, epoll):
 
     try :
         res_data = obj.getResponse()
-        logging.debug("send response [%d][%s]"%(fileno, res_data))
         obj.getClient().send( res_data )
 
-        # 
-        #epoll.modify(fileno, select.EPOLLIN)
         epoll.modify(fileno, poll_mode)
     except :
         try :
@@ -277,7 +254,7 @@ def close_request(fileno, connections):
     except :
         return
 
-    logging.debug("close [%d]"%(fileno))
+    #logging.debug("close [%d]"%(fileno))
     # close
     try :
         obj.getClient().detach()
@@ -299,47 +276,73 @@ def close_request(fileno, connections):
 
     del connections[fileno]
 
-def run_server(socket_options, address, rules):
-    """Run a simple TCP server using epoll."""
+def run_server(ip, bind_start, bind_end, rules):
+    server_sockets = {}
+    connections = {}
     try:
-        logging.debug("start")
-        with socketcontext(*socket_options) as server, epollcontext(server.fileno(), select.EPOLLIN) as epoll:
-            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            server.bind(address)
-            server.listen(5)
-            server.setblocking(0)
-            server.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            logging.debug("Listening")
+        logging.debug("Init Socket and EPOLL [%s]"%(ip))
+        epoll = select.epoll()
+        for port in range(bind_start, bind_end):
+            server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try :
+                server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                server.bind((ip, port))
+                server.listen(5)
+                server.setblocking(0)
+                server.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                logging.debug("Listening [%s:%d]"%(ip,port))
 
-            connections = {}
-            server_fd = server.fileno()
+                fd = server.fileno()
+                epoll.register( fd, select.EPOLLIN )
+                server_sockets[fd] = server
+            except :
+                logging.debug("Socket Init Exception [%s:%d]"%(ip, port))
 
-            while True:
-                events = epoll.poll(1)
+        logging.debug("Init Done Wait EPOLL [%s]"%(ip))
+        while True:
+            events = epoll.poll(1)
 
-                for fileno, event in events:
-                    if fileno == server_fd:
-                        init_connection(server, connections, epoll)
-                    elif event & select.EPOLLIN:
-                        logging.debug("request [%d][%s]"%(fileno, "select.EPOLLIN"))
-                        receive_request(fileno, connections, epoll, rules)
-                    elif event & select.EPOLLOUT:
-                        logging.debug("request [%d][%s]"%(fileno, "select.EPOLLOUT"))
-                        send_response(fileno, connections, epoll)
-                    elif event & select.EPOLLRDHUP:
-                        logging.debug("request [%d][%s]"%(fileno, "select.EPOLLRDHUP"))
-                        close_request(fileno, connections)
-                    elif event & select.EPOLLERR:
-                        logging.debug("request [%d][%s]"%(fileno, "select.EPOLLERR"))
-                        close_request(fileno, connections)
-                    elif event & select.EPOLLHUP:
-                        logging.debug("request [%d][%s]"%(fileno, "select.EPOLLHUP"))
-                        close_request(fileno, connections)
-                time.sleep(0.5)
+            for fileno, event in events:
+                if fileno in server_sockets:
+                    logging.debug("request [%d][%s]"%(fileno, "select.CONNECT"))
+                    server = server_sockets[ fileno ]
+                    init_connection(server, connections, epoll)
+                elif event & select.EPOLLIN:
+                    logging.debug("request [%d][%s]"%(fileno, "select.EPOLLIN"))
+                    receive_request(fileno, connections, epoll, rules)
+                elif event & select.EPOLLOUT:
+                    logging.debug("request [%d][%s]"%(fileno, "select.EPOLLOUT"))
+                    send_response(fileno, connections, epoll)
+                elif event & select.EPOLLRDHUP:
+                    logging.debug("request [%d][%s]"%(fileno, "select.EPOLLRDHUP"))
+                    close_request(fileno, connections)
+                elif event & select.EPOLLERR:
+                    logging.debug("request [%d][%s]"%(fileno, "select.EPOLLERR"))
+                    close_request(fileno, connections)
+                elif event & select.EPOLLHUP:
+                    logging.debug("request [%d][%s]"%(fileno, "select.EPOLLHUP"))
+                    close_request(fileno, connections)
+            time.sleep(0.5)
 
     except KeyboardInterrupt as e:
         print("Shutdown")
 
+    finally:
+        logging.debug("Finally EPOLL [%s]"%(ip))
+        for fd in server_fds :
+            try :
+                epoll.unregister(fd)
+            except :
+                pass
+        for server in server_sockets :
+            try :
+                server.close()
+            except :
+                pass
+        epoll.close()
+
+#--------------------------------------
+# Load Config File
 def load_yara( conf ):
     return yara.compile(filepaths=conf['rules']['yara'])
 
@@ -358,7 +361,10 @@ def load_snort( conf ):
             } )
 
     return ret
+#--------------------------------------
 
+#--------------------------------------
+# Main
 def run_server_thread( conf_filename ):
     f = open(conf_filename, "r+")
     conf_data = yaml.load(f)
@@ -375,11 +381,19 @@ def run_server_thread( conf_filename ):
         server['rules']['yara_data'] = load_yara( server )
         #print(server['rules']['yara_data'])
 
-        for port in range(server['port']['start'], server['port']['end']):
-            t1 = threading.Thread(name='port %d'%(port), 
-                    target=run_server, 
-                    args=([socket.AF_INET, socket.SOCK_STREAM], (server['ip'], port), server['rules']))
-            t1.start()
+#        for port in range(server['port']['start'], server['port']['end']):
+#            t1 = threading.Thread(name='port %d'%(port), 
+#                    target=run_server, 
+#                    args=([socket.AF_INET, socket.SOCK_STREAM], (server['ip'], port), server['rules']))
+#            t1.start()
+        bind_start = server['port']['start']
+        bind_end = server['port']['end']
+        t1 = threading.Thread(name='port %d->%d'%(bind_start, bind_end), 
+                target=run_server, 
+                args=(server['ip'], bind_start, bind_end, server['rules']))
+        t1.start()
+
+#--------------------------------------
 
 if __name__ == '__main__':
     run_server_thread( './conf.yaml' )
