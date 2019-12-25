@@ -2,8 +2,12 @@
 
 from __future__ import print_function
 from contextlib import contextmanager
+import os
 import time
 import yaml
+import json
+import string
+import datetime
 
 import socket
 import select
@@ -18,14 +22,48 @@ import snortsig
 logging.basicConfig(level=logging.DEBUG, format='%(threadName)s: %(message)s')
 logging.getLogger('chardet.charsetprober').setLevel(logging.INFO)
 
+gLogFilename = ""
+
+#--------------------------------------
+# Connection Infomation
 class ConnectionClass():
     def __init__(self):
         self.client_connection = None
         self.honey_connection = None
+
+        self.mutch_flag = False
+        self.alert_flag = False
+        self.add_delimit_flag = True
+
         self.request = ""
+        self.request_printable = ""
         self.response = ""
         self.buffer = ""
-        self.mutch_flag = False
+
+        self.remote_ip = ""
+        self.remote_port = 0
+        self.server_ip = ""
+        self.server_port = 0
+
+    def setRemote( self, ip, port ):
+        self.remote_ip = ip
+        self.remote_port = port
+
+    def getRemoteIp( self ):
+        return self.remote_ip
+
+    def getRemotePort( self ):
+        return self.remote_port
+
+    def setServer( self, ip, port ):
+        self.server_ip = ip
+        self.server_port = port
+
+    def getServerIp( self ):
+        return self.server_ip
+
+    def getServerPort( self ):
+        return self.server_port
 
     def setClient( self, connection ):
         self.client_connection = connection
@@ -40,13 +78,28 @@ class ConnectionClass():
         return self.honey_connection
         
     def addRequest( self, data ) :
+        if (len(data) > 0) and (ord(data[len(data)-1]) == 0x0) :
+            data = data[0:len(data)-1]
         self.request += data
+        p_data = strings(data)
+        if p_data != None :
+            self.request_printable += p_data
+            self.add_delimit_flag = True
 
     def getRequest( self ) :
         return self.request
 
+    def addRequestPrintableDelimit( self ) :
+        if self.add_delimit_flag :
+            self.request_printable += ','
+            self.add_delimit_flag = False
+
+    def getRequestPrintable( self ) :
+        return self.request_printable
+
     def doneRequest( self ) :
         self.request = ""
+        self.request_printable = ""
 
     def addResponse( self, data ) :
         self.buffer = data
@@ -63,36 +116,39 @@ class ConnectionClass():
     def getMutchFlag( self ) :
         return self.mutch_flag
 
-@contextmanager
-def socketcontext(*args, **kwargs):
-    """Context manager for a socket."""
-    s = socket.socket(*args, **kwargs)
-    try:
-        yield s
-    finally:
-        fd = s.fileno()
-        print("Close socket")
-        print( fd )
-        s.close()
+    def setAlertFlag( self, flag ) :
+        self.alert_flag = flag
 
-@contextmanager
-def epollcontext(*args, **kwargs):
-    """Context manager for an epoll loop."""
-    e = select.epoll()
-    e.register(*args, **kwargs)
-    try:
-        yield e
-    finally:
-        print("\nClose epoll loop")
-        e.unregister(args[0])
-        e.close()
+    def getAlertFlag( self ) :
+        return self.alert_flag
+#--------------------------------------
 
+#--------------------------------------
+# get printable strings
+def strings(text, min=1):
+    result = ""
+    for c in text:
+        if c.isalnum() or c.isspace() or c in [':','.','/','?','%''=']:
+#        if c in string.printable:
+            result += c
+
+    if len(result) >= min:
+        result = result.replace('\r','\\r')
+        result = result.replace('\n','\\n')
+        return result
+#--------------------------------------
+
+#--------------------------------------
+# connect to Backend Honey
 def connenct_to_honey(host, port):
     client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     client.connect((host, port))
     client.settimeout(1.0)
     return client
+#--------------------------------------
 
+#--------------------------------------
+# Accept Socket
 def init_connection(server, connections, epoll):
     """Initialize a connection."""
     con, address = server.accept()
@@ -105,13 +161,19 @@ def init_connection(server, connections, epoll):
     obj.setClient( con )
     connections[fd] = obj
 
+    obj.setRemote( con.getpeername()[0], con.getpeername()[1])
+    obj.setServer( con.getsockname()[0], con.getsockname()[1])
+#--------------------------------------
+
+#--------------------------------------
+# Recv from Attacker
 def receive_request(fileno, connections, epoll, rules):
     obj = connections[fileno]
     con = obj.getClient()
 
     # Get Recv Client Info
-    recv_ip = con.getsockname()[0]
-    recv_port = con.getsockname()[1]
+    recv_ip = obj.getServerIp()
+    recv_port = obj.getServerPort()
 #    logging.debug("recv port [%d][%s][%d]"%(fileno, recv_ip, recv_port))
 
     # Set Honey Info
@@ -123,7 +185,6 @@ def receive_request(fileno, connections, epoll, rules):
     tmp = con.recv(4096)
     # Empty Check: empty -> close socket
     if tmp == "" :
-        obj.doneRequest()
         close_request(fileno, connections)
         return
 
@@ -131,8 +192,6 @@ def receive_request(fileno, connections, epoll, rules):
 
     # ASCII code Check
     ascii_check = obj.getRequest( )
-    if (len(ascii_check) > 0) and (ord(ascii_check[len(ascii_check)-1]) == 0x0) :
-        ascii_check = ascii_check[0:len(ascii_check)-1]
     before_len = len( ascii_check )
     ascii_check = ascii_check.strip()
     after_len = len( ascii_check )
@@ -212,7 +271,6 @@ def receive_request(fileno, connections, epoll, rules):
     try :
         current.send( tmp )
         #logging.debug("Send hony [%d][%s][%d][%d][%s]"%(fileno, honey_ip, honey_port, len(tmp), tmp))
-        obj.doneRequest()
     except :
         close_request(fileno, connections)
 
@@ -220,13 +278,17 @@ def receive_request(fileno, connections, epoll, rules):
         epoll.modify(fileno, poll_mode)
     except :
         close_request(fileno, connections)
+#--------------------------------------
 
+#--------------------------------------
+# Send to Attacker
 def send_response(fileno, connections, epoll):
     poll_mode = select.EPOLLOUT + select.EPOLLIN
     #poll_mode = select.EPOLLIN
 
     #byteswritten = connections[fileno].send(responses[fileno])
     obj = connections[fileno]
+    obj.addRequestPrintableDelimit()
     current = obj.getHoney()
     try :
         response = current.recv(4096)
@@ -247,12 +309,47 @@ def send_response(fileno, connections, epoll):
             close_request(fileno, connections)
         except :
             pass
+#--------------------------------------
 
+#--------------------------------------
+# Close Socket
 def close_request(fileno, connections):
+    global gLogFilename
+
     try :
         obj = connections[fileno]
     except :
         return
+
+    orig_data = obj.getRequest()
+    printable_data = obj.getRequestPrintable()
+    obj.doneRequest()
+
+    recv_ip = obj.getServerIp()
+    recv_port = obj.getServerPort()
+    send_ip = obj.getRemoteIp()
+    send_port = obj.getRemotePort()
+
+    dt_now = datetime.datetime.now()
+    log_data = {
+        "timestamp": dt_now.strftime('%Y-%m-%d %H:%M:%S'),
+        "event_type": "autonapt",
+        "src_ip": send_ip,
+        "src_port": send_port,
+        "dest_ip": recv_ip,
+        "dest_port": recv_port,
+        "proto": "TCP",
+        "flow": {
+          "bytes_toserver": len(orig_data),
+        },
+        "payload": orig_data,
+        "payload_printable": printable_data
+      }
+
+    filename = dt_now.strftime( gLogFilename )
+    f = open(filename, 'a')
+    json.dump(log_data, f)
+    f.close()
 
     #logging.debug("close [%d]"%(fileno))
     # close
@@ -275,7 +372,10 @@ def close_request(fileno, connections):
                 pass
 
     del connections[fileno]
+#--------------------------------------
 
+#--------------------------------------
+# Run Socket Server
 def run_server(ip, bind_start, bind_end, rules):
     server_sockets = {}
     connections = {}
@@ -329,17 +429,18 @@ def run_server(ip, bind_start, bind_end, rules):
 
     finally:
         logging.debug("Finally EPOLL [%s]"%(ip))
-        for fd in server_fds :
+        for fd in server_sockets :
+            server = server_sockets[fd]
             try :
                 epoll.unregister(fd)
             except :
                 pass
-        for server in server_sockets :
             try :
                 server.close()
             except :
                 pass
         epoll.close()
+#--------------------------------------
 
 #--------------------------------------
 # Load Config File
@@ -366,9 +467,13 @@ def load_snort( conf ):
 #--------------------------------------
 # Main
 def run_server_thread( conf_filename ):
+    global gLogFilename
+
     f = open(conf_filename, "r+")
     conf_data = yaml.load(f)
     f.close()
+
+    gLogFilename = os.path.join( conf_data['log']['path'], conf_data['log']['filename'] )
 
     for server in conf_data['server'] :
         print( server );
@@ -381,11 +486,6 @@ def run_server_thread( conf_filename ):
         server['rules']['yara_data'] = load_yara( server )
         #print(server['rules']['yara_data'])
 
-#        for port in range(server['port']['start'], server['port']['end']):
-#            t1 = threading.Thread(name='port %d'%(port), 
-#                    target=run_server, 
-#                    args=([socket.AF_INET, socket.SOCK_STREAM], (server['ip'], port), server['rules']))
-#            t1.start()
         bind_start = server['port']['start']
         bind_end = server['port']['end']
         t1 = threading.Thread(name='port %d->%d'%(bind_start, bind_end), 
@@ -397,5 +497,4 @@ def run_server_thread( conf_filename ):
 
 if __name__ == '__main__':
     run_server_thread( './conf.yaml' )
-
 

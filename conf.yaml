@@ -1,3 +1,7 @@
+log:
+  path: "/var/log/autonapt"
+  filename: "autonapt_%Y%m%d.json"
+
 server:
 - ip: 127.0.0.1
   port:
