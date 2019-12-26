@@ -181,10 +181,10 @@ def init_connection(server, connections, epoll):
             "dest_port": recv_port,
             "proto": "TCP",
             "flow": {
-              "bytes_toserver": len(orig_data),
+              "bytes_toserver": 0,
             },
-            "payload": "scan",
-            "payload_printable": "scan"
+            "payload": "Connection error",
+            "payload_printable": "Connection error"
           }
 
         filename = dt_now.strftime( gLogFilename )
@@ -212,7 +212,12 @@ def receive_request(fileno, connections, epoll, rules):
     honey_port = rules['default']['port']
 
     # Recv Data
-    tmp = con.recv(4096)
+    try :
+        tmp = con.recv(4096)
+    except :
+        close_request(fileno, connections)
+        return
+
     # Empty Check: empty -> close socket
     if tmp == "" :
         close_request(fileno, connections)
@@ -243,6 +248,10 @@ def receive_request(fileno, connections, epoll, rules):
 
     poll_mode = select.EPOLLOUT + select.EPOLLIN
 
+    # Get Attacker Info
+    send_ip = obj.getRemoteIp()
+    send_port = obj.getRemotePort()
+
     # Check Snort Rule
     if mutch_flag == False :
         for item in rules['snort_data'] :
@@ -262,7 +271,7 @@ def receive_request(fileno, connections, epoll, rules):
                         current.close()
 
                 current = connect_to_honey( honey_ip, honey_port )
-                logging.info("SNORT hony port [%d][%s][%d]"%(fileno, honey_ip, honey_port))
+                logging.info("SNORT hony port [%s][%d]->[%s][%d]"%(send_ip, send_port, honey_ip, honey_port))
                 obj.setHoney(current)
                 mutch_flag = True
                 obj.setMutchFlag( mutch_flag )
@@ -284,7 +293,7 @@ def receive_request(fileno, connections, epoll, rules):
                     current.close()
 
             current = connect_to_honey( honey_ip, honey_port )
-            logging.info("YARA hony port [%d][%s][%d]"%(fileno, honey_ip, honey_port))
+            logging.info("YARA hony port [%s][%d]->[%s][%d]"%(send_ip, send_port, honey_ip, honey_port))
             obj.setHoney(current)
             mutch_flag = True
             obj.setMutchFlag( mutch_flag )
@@ -372,7 +381,7 @@ def close_request(fileno, connections):
         "flow": {
           "bytes_toserver": len(orig_data),
         },
-        "payload": orig_data,
+        "payload": orig_data.encode('base64').replace('\n',''),
         "payload_printable": printable_data
       }
 
