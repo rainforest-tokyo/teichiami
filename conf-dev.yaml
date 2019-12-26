@@ -1,0 +1,18 @@
+log:
+  path: "/var/log/autonapt"
+  filename: "rfpf_%Y%m%d.json"
+
+server:
+- ip: 0.0.0.0
+  port:
+    start: 18080
+    end: 18180
+  rules:
+    default:
+        ip: 127.0.0.1
+        port: 23
+    snort:
+        - ./snort_rules/index.rules
+    yara:
+        namespace1: ./yara_rules/index.yar
+

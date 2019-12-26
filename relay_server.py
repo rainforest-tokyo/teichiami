@@ -8,6 +8,7 @@ import yaml
 import json
 import string
 import datetime
+import argparse
 
 import socket
 import select
@@ -18,10 +19,6 @@ import threading
 
 import yara
 import snortsig
-
-#logging.basicConfig(level=logging.DEBUG, format='%(threadName)s: %(message)s')
-logging.basicConfig(level=logging.INFO, format='%(threadName)s: %(message)s')
-logging.getLogger('chardet.charsetprober').setLevel(logging.INFO)
 
 gLogFilename = ""
 
@@ -150,13 +147,14 @@ def connect_to_honey(host, port):
 
 #--------------------------------------
 # Accept Socket
-def init_connection(server, connections, epoll):
+def init_connection(server, connections, epoll, rules):
+    poll_mode = select.EPOLLOUT + select.EPOLLIN
     """Initialize a connection."""
     con, address = server.accept()
     con.setblocking(0)
 
     fd = con.fileno()
-    epoll.register(fd, select.EPOLLIN)
+    epoll.register(fd, poll_mode)
 
     obj = ConnectionClass()
     obj.setClient( con )
@@ -165,6 +163,21 @@ def init_connection(server, connections, epoll):
     try :
         obj.setServer( con.getsockname()[0], con.getsockname()[1])
         obj.setRemote( con.getpeername()[0], con.getpeername()[1])
+
+        # Connect to Default Honey
+        honey_ip = rules['default']['ip']
+        honey_port = rules['default']['port']
+
+        # Connect To Honey
+        try :
+            current = connect_to_honey( honey_ip, honey_port )
+        except :
+            close_request(fd, connections)
+            return
+        #logging.debug("DEF hony port [%d][%s][%d]"%(fileno, honey_ip, honey_port))
+        obj.setHoney(current)
+
+        send_response(fd, connections, epoll)
     except :
         recv_ip = obj.getServerIp()
         recv_port = obj.getServerPort()
@@ -198,6 +211,12 @@ def init_connection(server, connections, epoll):
 #--------------------------------------
 # Recv from Attacker
 def receive_request(fileno, connections, epoll, rules):
+    poll_mode = select.EPOLLOUT + select.EPOLLIN
+    #poll_mode = select.EPOLLOUT
+    #poll_mode += select.EPOLLRDHUP
+    #poll_mode += select.EPOLLERR
+    #poll_mode += select.EPOLLHUP
+
     obj = connections[fileno]
     con = obj.getClient()
 
@@ -235,7 +254,7 @@ def receive_request(fileno, connections, epoll, rules):
 
     str_status = ascii_check.isalnum()
     if str_status :
-#        logging.debug("recv request (TEXT) [%d][%s]"%(fileno, ascii_check))
+        logging.debug("recv request (TEXT) [%d][%s]"%(fileno, ascii_check))
         if mutch_flag == False :
             if before_len == after_len :
 #                logging.debug("not found New LINE")
@@ -243,10 +262,8 @@ def receive_request(fileno, connections, epoll, rules):
             else :
                 if ord(tmp[len(tmp)-1]) == 0x0 :
                     tmp = tmp[0:len(tmp)-1]
-#    else :
-#        logging.debug("recv request (BIN) [%d][%s]"%(fileno, tmp))
-
-    poll_mode = select.EPOLLOUT + select.EPOLLIN
+    else :
+        logging.debug("recv request (BIN) [%d][%s]"%(fileno, tmp))
 
     # Get Attacker Info
     send_ip = obj.getRemoteIp()
@@ -270,7 +287,12 @@ def receive_request(fileno, connections, epoll, rules):
                     except :
                         current.close()
 
-                current = connect_to_honey( honey_ip, honey_port )
+                try :
+                    current = connect_to_honey( honey_ip, honey_port )
+                except :
+                    honey_ip = rules['default']['ip']
+                    honey_port = rules['default']['port']
+                    current = connect_to_honey( honey_ip, honey_port )
                 logging.info("SNORT hony port [%s][%d]->[%s][%d]"%(send_ip, send_port, honey_ip, honey_port))
                 obj.setHoney(current)
                 mutch_flag = True
@@ -292,25 +314,25 @@ def receive_request(fileno, connections, epoll, rules):
                 except :
                     current.close()
 
-            current = connect_to_honey( honey_ip, honey_port )
+            try :
+                current = connect_to_honey( honey_ip, honey_port )
+            except :
+                honey_ip = rules['default']['ip']
+                honey_port = rules['default']['port']
+                current = connect_to_honey( honey_ip, honey_port )
             logging.info("YARA hony port [%s][%d]->[%s][%d]"%(send_ip, send_port, honey_ip, honey_port))
             obj.setHoney(current)
             mutch_flag = True
             obj.setMutchFlag( mutch_flag )
             break
 
-    # Connect To Honey
-    current = obj.getHoney()
-    if current == None :
-        current = connect_to_honey( honey_ip, honey_port )
-        #logging.debug("DEF hony port [%d][%s][%d]"%(fileno, honey_ip, honey_port))
-        obj.setHoney(current)
-
     # Send To Honey
+    current = obj.getHoney()
     try :
         current.send( tmp )
         #logging.debug("Send hony [%d][%s][%d][%d][%s]"%(fileno, honey_ip, honey_port, len(tmp), tmp))
     except :
+        logging.error("Send to Honey [%s][%d]->[%s][%d]"%(send_ip, send_port, honey_ip, honey_port))
         close_request(fileno, connections)
 
     try :
@@ -324,18 +346,23 @@ def receive_request(fileno, connections, epoll, rules):
 def send_response(fileno, connections, epoll):
     poll_mode = select.EPOLLOUT + select.EPOLLIN
     #poll_mode = select.EPOLLIN
+    #poll_mode += select.EPOLLRDHUP
+    #poll_mode += select.EPOLLERR
+    #poll_mode += select.EPOLLHUP
 
     #byteswritten = connections[fileno].send(responses[fileno])
     obj = connections[fileno]
     obj.addRequestPrintableDelimit()
     current = obj.getHoney()
     try :
+#        logging.debug("Recv Wait [%d]"%(fileno))
         response = current.recv(4096)
-        #logging.debug("Recv hony [%d][%d][%s]"%(fileno, len(response), response))
+#        logging.debug("Recv hony [%d][%d][%s]"%(fileno, len(response), response))
         obj.addResponse( response )
         if response == "" :
             close_request(fileno, connections)
     except :
+        #close_request(fileno, connections)
         return
 
     try :
@@ -416,6 +443,8 @@ def close_request(fileno, connections):
 #--------------------------------------
 # Run Socket Server
 def run_server(ip, bind_start, bind_end, rules):
+    poll_mode = select.EPOLLOUT + select.EPOLLIN
+    #poll_mode = select.EPOLLIN
     server_sockets = {}
     connections = {}
     try:
@@ -432,7 +461,7 @@ def run_server(ip, bind_start, bind_end, rules):
                 logging.debug("Listening [%s:%d]"%(ip,port))
 
                 fd = server.fileno()
-                epoll.register( fd, select.EPOLLIN )
+                epoll.register( fd, poll_mode )
                 server_sockets[fd] = server
             except :
                 logging.info("Socket Init Exception [%s:%d]"%(ip, port))
@@ -445,7 +474,7 @@ def run_server(ip, bind_start, bind_end, rules):
                 if fileno in server_sockets:
                     logging.debug("request [%d][%s]"%(fileno, "select.CONNECT"))
                     server = server_sockets[ fileno ]
-                    init_connection(server, connections, epoll)
+                    init_connection(server, connections, epoll, rules)
                 elif event & select.EPOLLIN:
                     logging.debug("request [%d][%s]"%(fileno, "select.EPOLLIN"))
                     receive_request(fileno, connections, epoll, rules)
@@ -535,5 +564,18 @@ def run_server_thread( conf_filename ):
 #--------------------------------------
 
 if __name__ == '__main__':
-    run_server_thread( './conf.yaml' )
+    parser = argparse.ArgumentParser(description='Packet Forwarder')
+    parser.add_argument('-c', '--config', default='./conf.yaml', help='config file')
+    parser.add_argument('-d', '--debug', action='store_true', help='debug mode')
+
+    args = parser.parse_args()
+
+    if args.debug :
+        logging.basicConfig(level=logging.DEBUG, format='%(threadName)s: %(message)s')
+    else :
+        logging.basicConfig(level=logging.INFO, format='%(threadName)s: %(message)s')
+    logging.getLogger('chardet.charsetprober').setLevel(logging.INFO)
+
+    run_server_thread( args.config )
+
 
