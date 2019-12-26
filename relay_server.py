@@ -19,7 +19,8 @@ import threading
 import yara
 import snortsig
 
-logging.basicConfig(level=logging.DEBUG, format='%(threadName)s: %(message)s')
+#logging.basicConfig(level=logging.DEBUG, format='%(threadName)s: %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(threadName)s: %(message)s')
 logging.getLogger('chardet.charsetprober').setLevel(logging.INFO)
 
 gLogFilename = ""
@@ -140,7 +141,7 @@ def strings(text, min=1):
 
 #--------------------------------------
 # connect to Backend Honey
-def connenct_to_honey(host, port):
+def connect_to_honey(host, port):
     client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     client.connect((host, port))
     client.settimeout(1.0)
@@ -161,8 +162,37 @@ def init_connection(server, connections, epoll):
     obj.setClient( con )
     connections[fd] = obj
 
-    obj.setRemote( con.getpeername()[0], con.getpeername()[1])
-    obj.setServer( con.getsockname()[0], con.getsockname()[1])
+    try :
+        obj.setServer( con.getsockname()[0], con.getsockname()[1])
+        obj.setRemote( con.getpeername()[0], con.getpeername()[1])
+    except :
+        recv_ip = obj.getServerIp()
+        recv_port = obj.getServerPort()
+        send_ip = obj.getRemoteIp()
+        send_port = obj.getRemotePort()
+
+        dt_now = datetime.datetime.now()
+        log_data = {
+            "timestamp": dt_now.strftime('%Y-%m-%d %H:%M:%S'),
+            "event_type": "autonapt",
+            "src_ip": send_ip,
+            "src_port": send_port,
+            "dest_ip": recv_ip,
+            "dest_port": recv_port,
+            "proto": "TCP",
+            "flow": {
+              "bytes_toserver": len(orig_data),
+            },
+            "payload": "scan",
+            "payload_printable": "scan"
+          }
+
+        filename = dt_now.strftime( gLogFilename )
+        f = open(filename, 'a')
+        json.dump(log_data, f)
+        f.close()
+
+        close_request(fd, connections)
 #--------------------------------------
 
 #--------------------------------------
@@ -231,8 +261,8 @@ def receive_request(fileno, connections, epoll, rules):
                     except :
                         current.close()
 
-                current = conenct_to_honey( honey_ip, honey_port )
-                logging.debug("SNORT hony port [%d][%s][%d]"%(fileno, honey_ip, honey_port))
+                current = connect_to_honey( honey_ip, honey_port )
+                logging.info("SNORT hony port [%d][%s][%d]"%(fileno, honey_ip, honey_port))
                 obj.setHoney(current)
                 mutch_flag = True
                 obj.setMutchFlag( mutch_flag )
@@ -253,8 +283,8 @@ def receive_request(fileno, connections, epoll, rules):
                 except :
                     current.close()
 
-            current = connenct_to_honey( honey_ip, honey_port )
-            logging.debug("YARA hony port [%d][%s][%d]"%(fileno, honey_ip, honey_port))
+            current = connect_to_honey( honey_ip, honey_port )
+            logging.info("YARA hony port [%d][%s][%d]"%(fileno, honey_ip, honey_port))
             obj.setHoney(current)
             mutch_flag = True
             obj.setMutchFlag( mutch_flag )
@@ -263,7 +293,7 @@ def receive_request(fileno, connections, epoll, rules):
     # Connect To Honey
     current = obj.getHoney()
     if current == None :
-        current = connenct_to_honey( honey_ip, honey_port )
+        current = connect_to_honey( honey_ip, honey_port )
         #logging.debug("DEF hony port [%d][%s][%d]"%(fileno, honey_ip, honey_port))
         obj.setHoney(current)
 
@@ -380,7 +410,7 @@ def run_server(ip, bind_start, bind_end, rules):
     server_sockets = {}
     connections = {}
     try:
-        logging.debug("Init Socket and EPOLL [%s]"%(ip))
+        logging.info("Init Socket and EPOLL [%s]"%(ip))
         epoll = select.epoll()
         for port in range(bind_start, bind_end):
             server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -396,9 +426,9 @@ def run_server(ip, bind_start, bind_end, rules):
                 epoll.register( fd, select.EPOLLIN )
                 server_sockets[fd] = server
             except :
-                logging.debug("Socket Init Exception [%s:%d]"%(ip, port))
+                logging.info("Socket Init Exception [%s:%d]"%(ip, port))
 
-        logging.debug("Init Done Wait EPOLL [%s]"%(ip))
+        logging.info("Init Done Wait EPOLL [%s]"%(ip))
         while True:
             events = epoll.poll(1)
 
@@ -428,7 +458,7 @@ def run_server(ip, bind_start, bind_end, rules):
         print("Shutdown")
 
     finally:
-        logging.debug("Finally EPOLL [%s]"%(ip))
+        logging.info("Finally EPOLL [%s]"%(ip))
         for fd in server_sockets :
             server = server_sockets[fd]
             try :

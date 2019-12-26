@@ -1,1 +1,3 @@
-alert tcp any 18081 -> 127.0.0.1 80 ( gid:100; sid:1001; msg:"HTTP Forward"; )
+alert tcp any 22 -> 127.0.0.1 60022 ( gid:100; sid:1001; msg:"SSH Forward"; )
+alert tcp any 2222 -> 127.0.0.1 60022 ( gid:100; sid:1002; msg:"SSH Forward"; )
+
