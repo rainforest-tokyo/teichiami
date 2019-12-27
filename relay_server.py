@@ -415,6 +415,7 @@ def close_request(fileno, connections):
     filename = dt_now.strftime( gLogFilename )
     f = open(filename, 'a')
     json.dump(log_data, f)
+    f.write( '\n' )
     f.close()
 
     #logging.debug("close [%d]"%(fileno))
